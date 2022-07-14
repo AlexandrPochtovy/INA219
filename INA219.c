@@ -25,37 +25,44 @@ static const uint32_t  INA219_ShuntResistancemOmh = 100;//shunt resistance in mi
 #define INA219_CalibrationVal				(uint32_t)0x08000000 / ((uint32_t)(INA219_MaxCurrentmA * INA219_ShuntResistancemOmh) / 10)
 #define INA219_Current_LSB_mkA			(uint32_t)(INA219_MaxCurrentmA * 1000 / 0x8000)
 #define INA219_Power_LSB_mkV				(uint32_t)(20 * INA219_Current_LSB_mkA)
+
+static inline CONCAT_BYTES(uint8_t msb, uint8_t lsb) {
+    return (uint16_t)(((uint16_t)msb << 8) | (uint16_t)lsb);
+}
+
 //Init & setup	=============================================================================================
-INA_Connect_Status INA219_Init(I2C_Connection *_i2c, INA219_dev *dev, uint8_t *pbuffer) {
-	if (_i2c->i2cStatus == I2C_Bus_Free) {
+uint8_t INA219_Init(I2C_Connection *_i2c, INA219_t *dev) {
+	if (_i2c->status == PORT_FREE) {
 		_i2c->addr = dev->addr;
 		_i2c->len = INA219_REG_LEN;
 		_i2c->mode = I2C_MODE_WRITE;
-		_i2c->rxtxp = pbuffer;
+		uint8_t dt[INA219_REG_LEN];
 		switch (dev->step) {
 		case 0:
-			dev->status = INA_Init;
+			dev->status = INIT;
 			_i2c->reg = INA219_REG_CONFIG;
 			uint16_t cfg = 	INA219_CFG_MODE_SHBV_CONTINUOUS 	|	// shunt and bus voltage continuous	defaulth
 									INA219_CFG_SADC_12BIT_128S 					|	// 128 x 12-bit shunt samples averaged together
 									INA219_CFG_BADC_12BIT_128S 					|	// 128 x 12-bit bus samples averaged together
 									INA219_CFG_GAIN_8_320MV 						|	// Gain 8, 320mV Range defaulth
 									INA219_CFG_BVRANGE_16V;							// 0-16V Range
-			_i2c->rxtxp[0] = (uint8_t)cfg;
-			_i2c->rxtxp[1] = (uint8_t)(cfg >> 8);
+			dt[0] = (uint8_t)cfg;
+			dt[1] = (uint8_t)(cfg >> 8);
+			PutMulti(&_i2c->buffer, dt, INA219_REG_LEN);
 			dev->step = 1;
 			break;
 		case 1:
 			dev->raw.calibration = INA219_CalibrationVal;
 			_i2c->reg = INA219_REG_CALIBRATION;
-			_i2c->rxtxp[0] = (uint8_t)dev->raw.calibration;
-			_i2c->rxtxp[1] = (uint8_t)(dev->raw.calibration >> 8);
+			dt[0] = (uint8_t)dev->raw.calibration;
+			dt[1] = (uint8_t)(dev->raw.calibration >> 8);
+			PutMulti(&_i2c->buffer, dt, INA219_REG_LEN);
 			dev->step = 2;
 			break;
 		case 2:
-			dev->status = INA_OK;
+			dev->status = OK;
 			dev->step = 0;
-			return INA_Complite;
+			return 1;
 			break;
 		default:
 			dev->step = 0;
@@ -63,61 +70,56 @@ INA_Connect_Status INA219_Init(I2C_Connection *_i2c, INA219_dev *dev, uint8_t *p
 		}
 		I2C_Start_IRQ(_i2c);
 	}
-	return INA_Processing;
+	return 0;
 }
 
-INA_Connect_Status INA219_GetRawData(I2C_Connection *_i2c, INA219_dev *dev, uint8_t *pbuffer) {
-	if ((_i2c->i2cStatus == I2C_Bus_Free) && (dev->status == INA_OK)) {
+uint8_t INA219_GetRawData(I2C_Connection *_i2c, INA219_t *dev) {
+	if ((_i2c->status == PORT_FREE) && (dev->status == OK)) {
+		uint8_t dt[INA219_REG_LEN];
 		_i2c->addr = dev->addr;
 		_i2c->len = INA219_REG_LEN;
 		_i2c->mode = I2C_MODE_READ;
-		_i2c->rxtxp = pbuffer;
 		switch (dev->step) {
 		case 0://select reg
-			switch (dev->reg) {
+			switch (_i2c->reg) {
 			case INA219_REG_SHUNTVOLTAGE://shunt voltage
-				dev->reg = INA219_REG_BUSVOLTAGE;//read shunt voltage
 				_i2c->reg = INA219_REG_BUSVOLTAGE;//read shunt voltage
 				break;
 			case INA219_REG_BUSVOLTAGE://read shunt voltage
-				dev->reg = INA219_REG_POWER;//read power
 				_i2c->reg = INA219_REG_POWER;//read power
 				break;
 			case INA219_REG_POWER://read power
-				dev->reg = INA219_REG_CURRENT;//read current
 				_i2c->reg = INA219_REG_CURRENT;//read current
 				break;
 			case INA219_REG_CURRENT://current
-				dev->reg = INA219_REG_SHUNTVOLTAGE;//read voltage
 				_i2c->reg = INA219_REG_SHUNTVOLTAGE;//read voltage
 				break;
 			default:
-				dev->reg = INA219_REG_SHUNTVOLTAGE;
 				_i2c->reg = INA219_REG_SHUNTVOLTAGE;
 				break;
 			}
 			dev->step = 1;
 			break;
-
 		case 1:
-			switch (dev->reg) {
-			case INA219_REG_SHUNTVOLTAGE://shunt voltage
-					dev->raw.shuntV = INA219_CONCAT_BYTES(_i2c->rxtxp[0], _i2c->rxtxp[1]);;
+			GetMulti(&_i2c->buffer, dt, INA219_REG_LEN);
+			switch (_i2c->reg) {
+				case INA219_REG_SHUNTVOLTAGE:
+					dev->raw.shuntV = (int16_t)CONCAT_BYTES(dt[0], dt[1]);
 					break;
-			case INA219_REG_BUSVOLTAGE://read shunt voltage
-				dev->raw.voltage = INA219_CONCAT_BYTES(_i2c->rxtxp[0], _i2c->rxtxp[1]);
-				break;
-			case INA219_REG_POWER://read power
-				dev->raw.power = INA219_CONCAT_BYTES(_i2c->rxtxp[0], _i2c->rxtxp[1]);
-				break;
-			case INA219_REG_CURRENT://current
-				dev->raw.current = INA219_CONCAT_BYTES(_i2c->rxtxp[0], _i2c->rxtxp[1]);
-				break;
-			default:
-				break;
+				case INA219_REG_BUSVOLTAGE://read shunt voltage
+					dev->raw.voltage = (uint16_t)CONCAT_BYTES(dt[0], dt[1]);
+					break;
+				case INA219_REG_POWER://read power
+					dev->raw.power = (uint16_t)CONCAT_BYTES(dt[0], dt[1]);
+					break;
+				case INA219_REG_CURRENT://current
+					dev->raw.current = (uint16_t)CONCAT_BYTES(dt[0], dt[1]);
+					return 1;
+					break;
+				default:
+					break;
 			}
 			dev->step = 0;
-			return INA_Complite;
 			break;
 		default:
 			dev->step = 0;
@@ -125,29 +127,29 @@ INA_Connect_Status INA219_GetRawData(I2C_Connection *_i2c, INA219_dev *dev, uint
 		}
 		I2C_Start_IRQ(_i2c);
 	}
-	return INA_Processing;
+	return 0;
 }
 //Get & conversion raw data	=================================================================================
-uint16_t INA219_GetVoltageInt(INA219_dev *dev, uint16_t divider) {
+uint16_t INA219_GetVoltageInt(INA219_t *dev, uint16_t divider) {
 	return (uint16_t)(((uint32_t)(dev->raw.voltage >> 3  ) * 4) / divider);
 }
 
-float INA219_GetVoltageFloat(INA219_dev *dev, uint16_t divider) {
+float INA219_GetVoltageFloat(INA219_t *dev, uint16_t divider) {
 	return ((float)((uint32_t)(dev->raw.voltage >> 3) * 4)) / divider;
 }
 
-uint16_t INA219_GetCurrentInt(INA219_dev *dev, uint16_t divider) {
+uint16_t INA219_GetCurrentInt(INA219_t *dev, uint16_t divider) {
 	return (uint16_t)(((uint32_t)dev->raw.current * INA219_Current_LSB_mkA) / divider);
 }
 
-float INA219_GetCurrentFloat(INA219_dev *dev, uint16_t divider) {
+float INA219_GetCurrentFloat(INA219_t *dev, uint16_t divider) {
 	return ((float)((uint32_t)dev->raw.current * INA219_Current_LSB_mkA)) / divider;
 }
 
-uint16_t INA219_GetPowerInt(INA219_dev *dev, uint16_t divider) {
+uint16_t INA219_GetPowerInt(INA219_t *dev, uint16_t divider) {
 	return (uint16_t)(((uint32_t)dev->raw.power * INA219_Power_LSB_mkV) / divider);
 }
 
-float INA219_GetPowerFloat(INA219_dev *dev, uint16_t divider) {
+float INA219_GetPowerFloat(INA219_t *dev, uint16_t divider) {
 	return (float)(((uint32_t)dev->raw.power * INA219_Power_LSB_mkV)) / divider;
 }
